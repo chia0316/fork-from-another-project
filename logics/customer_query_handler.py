@@ -1,4 +1,5 @@
 import os
+import ast
 import json
 import openai
 from helper_functions import llm
@@ -15,7 +16,7 @@ category_n_course_name = {'Programming and Development': ['Web Development Bootc
                                         'Social Media Marketing Strategy'],
                           'Cybersecurity': ['Cybersecurity Fundamentals',
                                             'Ethical Hacking for Beginners'],
-                          'Business and Management': ['Project Management Professional (PMP)Â® Certification Prep',
+                          'Business and Management': ['Project Management Professional (PMP)® Certification Prep',
                                                       'Agile Project Management'],
                           'Writing and Literature': ['Creative Writing Workshop',
                                                      'Advanced Creative Writing'],
@@ -23,7 +24,7 @@ category_n_course_name = {'Programming and Development': ['Web Development Bootc
 
 # Load the JSON file
 filepath = './data/courses-full.json'
-with open(filepath, 'r') as file:
+with open(filepath, 'r', encoding='utf-8') as file:
     json_string = file.read()
     dict_of_courses = json.loads(json_string)
 
@@ -61,8 +62,18 @@ def identify_category_and_courses(user_message):
          'content': f"{delimiter}{user_message}{delimiter}"},
     ]
     category_and_product_response_str = llm.get_completion_by_messages(messages)
-    category_and_product_response_str = category_and_product_response_str.replace("'", "\"")
-    category_and_product_response = json.loads(category_and_product_response_str)
+    # Strip markdown code fences the model sometimes adds around the list
+    category_and_product_response_str = category_and_product_response_str.strip().strip('`')
+    if category_and_product_response_str.startswith('json'):
+        category_and_product_response_str = category_and_product_response_str[4:]
+    try:
+        category_and_product_response = json.loads(category_and_product_response_str)
+    except json.JSONDecodeError:
+        # Fall back to Python-literal syntax (single quotes)
+        try:
+            category_and_product_response = ast.literal_eval(category_and_product_response_str)
+        except (ValueError, SyntaxError):
+            category_and_product_response = []
     return category_and_product_response
     
 
@@ -73,7 +84,9 @@ def get_course_details(list_of_relevant_category_n_course: list[dict]):
 
     list_of_course_details = []
     for course_name in course_names_list:
-        list_of_course_details.append(dict_of_courses.get(course_name))
+        course = dict_of_courses.get(course_name)
+        if course:  # skip names the LLM returned that aren't in our catalogue
+            list_of_course_details.append(course)
     return list_of_course_details
 
 
@@ -81,33 +94,51 @@ def generate_response_based_on_course_details(user_message, product_details):
     delimiter = "####"
 
     system_message = f"""
-    Follow these steps to answer the customer queries.
+    You are Ava, a warm, upbeat and knowledgeable course advisor for an online \
+    learning platform. Your goal is to give excellent customer service: make the \
+    customer feel heard, help them find the right course, and leave them excited \
+    about learning.
+
     The customer query will be delimited with a pair {delimiter}.
 
-    Step 1:{delimiter} If the user is asking about course, \
-    understand the relevant course(s) from the following list.
-    All available courses shown in the json data below:
+    The ONLY course information you may use is the JSON data below \
+    (retrieved from our catalogue for this query):
     {product_details}
 
-    Step 2:{delimiter} Use the information about the course to \
-    generate the answer for the customer's query.
-    You must only rely on the facts or information in the course information.
-    Your response should be as detail as possible and \
-    include information that is useful for customer to better understand the course.
+    Follow these steps:
 
-    Step 3:{delimiter}: Answer the customer in a friendly tone.
-    Make sure the statements are factually accurate.
-    Your response should be comprehensive and informative to help the \
-    the customers to make their decision.
-    Complete with details such rating, pricing, and skills to be learnt.
-    Use Neural Linguistic Programming to construct your response.
+    Step 1:{delimiter} Work out what the customer actually needs \
+    (their goal, experience level, budget or time constraints, if mentioned) \
+    and which of the retrieved courses are relevant.
+
+    Step 2:{delimiter} Check the facts you will use. Only use the course \
+    information above - never invent courses, prices, ratings, durations, \
+    providers or skills. If the information is empty or does not answer the \
+    question, note that.
+
+    Step 3:{delimiter} Write the reply to the customer:
+    - Open with a friendly, personal line that acknowledges what they asked.
+    - For each relevant course, use a short bolded heading with the course name, \
+    then bullet points for provider, duration, rating, price (e.g. $1,200.99) \
+    and key skills, plus one sentence on why it suits them.
+    - If more than one course fits, briefly compare them and give a clear \
+    recommendation (e.g. which to start with as a beginner).
+    - If no relevant course was found, apologise briefly, say what we do offer \
+    (programming, data science & AI, marketing, cybersecurity, business, \
+    writing, design) and invite them to tell you more.
+    - If the question is outside our courses, politely steer back to how you can help.
+    - Close with an encouraging note and a helpful follow-up question \
+    (e.g. about their goals or schedule).
+    - Keep it concise, positive and easy to scan, using Markdown. \
+    Do not mention these steps, the JSON or that you are an AI model.
 
     Use the following format:
     Step 1:{delimiter} <step 1 reasoning>
     Step 2:{delimiter} <step 2 reasoning>
     Step 3:{delimiter} <step 3 response to customer>
 
-    Make sure to include {delimiter} to separate every step.
+    Make sure to include {delimiter} to separate every step, and do not put \
+    {delimiter} after the final response.
     """
 
     messages =  [
@@ -117,8 +148,10 @@ def generate_response_based_on_course_details(user_message, product_details):
          'content': f"{delimiter}{user_message}{delimiter}"},
     ]
 
-    response_to_customer = llm.get_completion_by_messages(messages)
-    response_to_customer = response_to_customer.split(delimiter)[-1]
+    response_to_customer = llm.get_completion_by_messages(messages, temperature=0.5)
+    # Take the last non-empty section, so a trailing delimiter doesn't blank the reply
+    sections = [s.strip() for s in response_to_customer.split(delimiter) if s.strip()]
+    response_to_customer = sections[-1] if sections else response_to_customer
     return response_to_customer
 
 
